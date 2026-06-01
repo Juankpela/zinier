@@ -333,14 +333,22 @@ def extract_text_from_message(message: Any) -> str:
     return "\n".join(chunks).strip()
 
 
-async def call_claude(image_bytes: bytes, media_type: str) -> str:
+async def async def call_claude(image_bytes: bytes, media_type: str) -> str:
     if not anthropic_client:
         raise HTTPException(503, "ANTHROPIC_API_KEY no configurado.")
 
     prompt = build_prompt()
     image_data = base64.b64encode(image_bytes).decode("utf-8")
+
     async with analysis_semaphore:
         try:
+            logger.info(
+                "Claude request model=%s media_type=%s image_size=%s",
+                ANTHROPIC_MODEL,
+                media_type,
+                len(image_bytes)
+            )
+
             message = await anthropic_client.messages.create(
                 model=ANTHROPIC_MODEL,
                 max_tokens=900,
@@ -357,15 +365,26 @@ async def call_claude(image_bytes: bytes, media_type: str) -> str:
                                     "data": image_data,
                                 },
                             },
-                            {"type": "text", "text": prompt},
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
                         ],
                     }
                 ],
             )
+
+            logger.info("Claude response OK")
+
+            return extract_text_from_message(message)
+
         except Exception as exc:
-            logger.warning("Claude error: %s", exc)
-            raise HTTPException(502, "Error consultando Claude Vision.")
-    return extract_text_from_message(message)
+            logger.exception("ERROR COMPLETO CLAUDE")
+
+            raise HTTPException(
+                status_code=502,
+                detail=f"{type(exc).__name__}: {str(exc)}"
+            )
 
 
 def parse_json_response(raw_text: str) -> dict[str, Any]:
