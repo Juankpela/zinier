@@ -333,7 +333,7 @@ def extract_text_from_message(message: Any) -> str:
     return "\n".join(chunks).strip()
 
 
-async def async def call_claude(image_bytes: bytes, media_type: str) -> str:
+async def call_claude(image_bytes: bytes, media_type: str) -> str:
     if not anthropic_client:
         raise HTTPException(503, "ANTHROPIC_API_KEY no configurado.")
 
