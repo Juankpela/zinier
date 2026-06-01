@@ -25,10 +25,16 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+ANTHROPIC_MODEL = os.getenv(
+    "ANTHROPIC_MODEL",
+    "claude-sonnet-4-20250514"
+).strip()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
 API_PORT = int(os.getenv("PORT", "8001"))
 API_ACCESS_TOKEN = os.getenv("API_ACCESS_TOKEN", "")
 
