@@ -201,6 +201,38 @@ header p {
     border-left: 4px solid var(--primary);
 }
 
+.ports-list {
+    margin-top: 1.5rem;
+}
+
+.ports-list ul {
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.6rem;
+    margin-top: 0.8rem;
+}
+
+.port-item {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem;
+    font-size: 0.88rem;
+}
+
+.port-item.occupied {
+    border-color: rgba(239, 68, 68, 0.55);
+}
+
+.port-item.available {
+    border-color: rgba(16, 185, 129, 0.55);
+}
+
+.port-item.unknown {
+    border-color: rgba(245, 158, 11, 0.65);
+}
+
 /* Loader */
 .loader {
     width: 20px;
