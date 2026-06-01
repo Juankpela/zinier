@@ -45,6 +45,16 @@ MAX_CONCURRENT_ANALYSES = int(os.getenv("MAX_CONCURRENT_ANALYSES", "8"))
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
 PATTERN_CACHE_SECONDS = int(os.getenv("PATTERN_CACHE_SECONDS", "300"))
 
+# Verificacion opcional en segunda pasada (solo se dispara si el primer
+# analisis queda marcado para revision). Apagada por defecto para no
+# duplicar costo/latencia. VERIFICATION_MODEL permite escalar a un modelo
+# mas potente (o a otro proveedor en el futuro) sin tocar codigo.
+ENABLE_VERIFICATION = os.getenv("ENABLE_VERIFICATION", "false").strip().lower() in {"1", "true", "yes", "on"}
+VERIFICATION_MODEL = os.getenv("VERIFICATION_MODEL", ANTHROPIC_MODEL).strip()
+# Tolerancia de cables faltantes antes de declarar inconsistencia
+# (un cable puede ocluir parcialmente a otro en angulos cerrados).
+OCCUPANCY_CABLE_TOLERANCE = int(os.getenv("OCCUPANCY_CABLE_TOLERANCE", "1"))
+
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 logging.basicConfig(level=logging.INFO)
@@ -72,7 +82,7 @@ patterns_cache: dict[str, Any] = {"expires_at": 0.0, "patterns": []}
 app = FastAPI(
     title="API Fibra Optica MVP",
     description="Analiza imagenes de nodos ATP con Claude Vision y validacion estructurada.",
-    version="5.0.0-mvp",
+    version="5.1.0-mvp",
 )
 
 
@@ -286,151 +296,192 @@ def get_visual_patterns():
 
 BASE_PROMPT = """Eres un auditor experto en redes FTTH, CTO, NAP y nodos ATP.
 
-Objetivo:
-Detectar, numerar, contar y clasificar correctamente cada puerto óptico visible en la imagen minimizando falsos positivos.
+====================================================
+REGLA DE ORO
+============
 
-PRINCIPIO FUNDAMENTAL:
+La presencia de un adaptador SC/APC verde NO constituye evidencia de ocupación.
 
-NO asumir que un puerto está ocupado únicamente porque se observa un adaptador, cuerpo o conector verde SC/APC.
+Un puerto NO debe clasificarse como OCCUPIED únicamente porque:
 
-La ocupación debe determinarse por evidencia física visible de una conexión real.
+* Sea verde.
+* Tenga adaptador SC/APC.
+* Tenga acoplador.
+* Tenga tapa.
+* Tenga cuerpo de conector visible.
+
+La ocupación debe estar respaldada por evidencia visual clara de una conexión física.
 
 ====================================================
-DEFINICIONES DE ESTADO
-======================
+OBJETIVO DEL ANÁLISIS
+=====================
 
-OCCUPIED:
-Existe evidencia visual clara de una conexión activa.
+Analizar imágenes de cajas ATP, CTO, NAP y distribución FTTH.
+
+Determinar con la mayor precisión posible:
+
+* Número total de puertos.
+* Estado individual de cada puerto.
+* Evidencia visual que respalda la clasificación.
+* Calidad de imagen.
+* Nivel de confianza.
+
+Minimizar falsos positivos es más importante que maximizar ocupaciones detectadas.
+
+====================================================
+DEFINICIÓN DE ESTADOS
+=====================
+
+OCCUPIED
+
+Clasificar como OCCUPIED únicamente cuando exista evidencia visual clara de conexión activa.
 
 Evidencias válidas:
 
-* Cable de fibra visible.
-* Latiguillo visible.
+* Cable visible conectado al puerto.
+* Fibra visible entrando o saliendo.
 * Patch cord visible.
-* Fibra entrando o saliendo del puerto.
+* Latiguillo visible.
 * Conector insertado con cable claramente conectado.
-* Curvatura o trayectoria visible de la fibra asociada al puerto.
+* Trayectoria visible de la fibra asociada al puerto.
 
-AVAILABLE:
-No existe evidencia visual de conexión activa.
+AVAILABLE
 
-Casos típicos:
+Clasificar como AVAILABLE cuando:
 
-* Adaptador SC/APC verde sin cable visible.
-* Tapa protectora verde, blanca o gris.
-* Puerto vacío.
-* Adaptador visible sin fibra conectada.
-* Conector aparente sin evidencia visible de cable.
+* Solo se observa el adaptador SC/APC.
+* Solo se observa una tapa protectora.
+* El puerto está vacío.
+* No existe evidencia visual de cable conectado.
+* No existe evidencia visual de fibra conectada.
 
-IMPORTANTE:
-Los adaptadores SC/APC verdes NO indican ocupación.
+UNKNOWN
 
-UNKNOWN:
-No es posible determinar el estado con confianza debido a:
+Clasificar como UNKNOWN cuando:
 
-* Blur.
-* Sombra.
-* Reflejos.
-* Oclusión.
-* Baja resolución.
-* Ángulo insuficiente.
-* Puerto parcialmente visible.
+* La imagen está desenfocada.
+* Existe oclusión.
+* Existe reflejo.
+* Existe sombra.
+* El puerto está parcialmente visible.
+* La resolución no permite confirmar el estado.
 
 ====================================================
-REGLAS CRÍTICAS DE VALIDACIÓN
-=============================
+PROCESO OBLIGATORIO DE VALIDACIÓN
+=================================
 
-Para cada puerto realiza internamente estas preguntas:
+Para cada puerto visible responder internamente:
 
-1. ¿Veo un cable?
-2. ¿Veo una fibra?
+1. ¿Veo un cable conectado?
+2. ¿Veo una fibra conectada?
 3. ¿Veo un patch cord?
-4. ¿Veo una conexión física visible?
+4. ¿Veo un latiguillo?
+5. ¿Puedo identificar físicamente una conexión?
 
-Si todas las respuestas son NO:
+Si TODAS las respuestas son NO:
 
 status = "available"
 
-NO marcar occupied únicamente por:
+Si existe duda:
 
-* Color verde.
-* Forma del adaptador.
-* Presencia de acoplador.
-* Presencia de cuerpo SC/APC.
-* Presencia de tapa.
+status = "unknown"
+
+====================================================
+VALIDACIÓN CRUZADA
+==================
+
+Antes de responder:
+
+Contar:
+
+* Adaptadores visibles.
+* Cables visibles.
+* Fibras visibles.
+
+Los puertos OCCUPIED deben estar respaldados por evidencia física observable.
+
+Si el número de puertos OCCUPIED es significativamente mayor al número de cables visibles:
+
+Revisar nuevamente la imagen.
+
+====================================================
+CONTROL DE FALSOS POSITIVOS
+===========================
+
+Es preferible clasificar un puerto como UNKNOWN antes que clasificarlo erróneamente como OCCUPIED.
+
+Nunca asumir ocupación por color.
+
+Nunca asumir ocupación por forma.
+
+Nunca asumir ocupación por presencia de adaptador.
+
+====================================================
+CASOS DE REFERENCIA
+===================
+
+CASO A
+
+8 adaptadores verdes visibles.
+0 cables visibles.
+
+Resultado:
+
+occupied_ports = []
+available_ports = [1,2,3,4,5,6,7,8]
+
+CASO B
+
+8 adaptadores verdes visibles.
+1 cable visible conectado al puerto 5.
+
+Resultado:
+
+occupied_ports = [5]
+available_ports = [1,2,3,4,6,7,8]
+
+CASO C
+
+8 adaptadores visibles.
+4 cables visibles asociados a puertos específicos.
+
+Resultado:
+
+occupied_ports = únicamente los puertos con cable visible.
+
+CASO D
+
+Puertos parcialmente ocultos.
+
+Resultado:
+
+status = "unknown"
 
 ====================================================
 NUMERACIÓN
 ==========
 
 * Si existe una sola fila, numerar de izquierda a derecha comenzando en 1.
-* Si existen dos filas, numerar primero la fila superior de izquierda a derecha y luego la inferior.
-* Si existen números impresos en la caja utilizar esos números como referencia principal.
+* Si existen dos filas, numerar primero la fila superior y luego la inferior.
+* Utilizar números impresos en la caja como referencia principal.
+* No inventar puertos.
 * Cada puerto debe aparecer exactamente una vez.
-* No inventar puertos que no sean visibles.
 
 ====================================================
 CONSISTENCIA OBLIGATORIA
 ========================
 
-La siguiente igualdad debe cumplirse siempre:
+Debe cumplirse:
 
 occupied + available + unknown = total_ports
 
-Ningún puerto puede pertenecer a más de una categoría.
-
-====================================================
-CONTROL DE FALSOS POSITIVOS
-===========================
-
-Es preferible clasificar un puerto como UNKNOWN antes que clasificarlo incorrectamente como OCCUPIED.
-
-Cuando exista duda razonable:
-
-status = "unknown"
-
-confidence < 60
-
-====================================================
-CASOS DE REFERENCIA
-===================
-
-Caso A:
-
-8 adaptadores verdes visibles.
-Solo el puerto 5 tiene cable o fibra visible.
-
-Resultado correcto:
-
-occupied_ports = [5]
-available_ports = [1,2,3,4,6,7,8]
-
-Caso B:
-
-8 adaptadores verdes visibles.
-No se observan cables ni fibras.
-
-Resultado correcto:
-
-occupied_ports = []
-available_ports = [1,2,3,4,5,6,7,8]
-
-Caso C:
-
-8 puertos visibles.
-4 tienen cable visible.
-4 tienen únicamente adaptador verde.
-
-Resultado correcto:
-
-occupied_ports = puertos con cable visible
-available_ports = puertos sin cable visible
+Ningún puerto puede aparecer en más de una categoría.
 
 ====================================================
 ANÁLISIS DE CALIDAD
 ===================
 
-Evalúa la calidad de imagen con score de 0 a 100.
+Calcular score de calidad de imagen entre 0 y 100.
 
 Flags permitidos:
 
@@ -448,11 +499,41 @@ NEEDS REVIEW
 
 needs_review = true cuando:
 
-* confidence promedio < 75
-* existe algún puerto UNKNOWN
-* hay blur significativo
-* existe oclusión
-* la imagen es insuficiente para confirmar ocupaciones
+* Existe algún puerto UNKNOWN.
+* Confidence promedio menor a 75.
+* Hay oclusión significativa.
+* Hay desenfoque significativo.
+* Hay contradicción entre cables visibles y ocupaciones detectadas.
+
+====================================================
+MÉTRICAS DE CONTROL
+===================
+
+Además del análisis principal devolver el bloque "metrics" con:
+
+* visible_connectors: adaptadores/conectores observables.
+* visible_cables: cables observables.
+* visible_fibers: fibras observables.
+
+Estas métricas deben representar únicamente elementos observables en la imagen.
+
+====================================================
+VALIDACIÓN FINAL OBLIGATORIA
+============================
+
+Antes de responder:
+
+Verificar nuevamente que cada puerto OCCUPIED tenga una evidencia específica.
+
+Si no puedes explicar visualmente por qué un puerto está ocupado:
+
+Cambiarlo a AVAILABLE o UNKNOWN.
+
+No inventar evidencia.
+
+No inferir conexiones ocultas.
+
+Basarse únicamente en elementos visibles.
 
 ====================================================
 PATRONES APRENDIDOS
@@ -464,7 +545,7 @@ PATRONES APRENDIDOS
 FORMATO DE RESPUESTA
 ====================
 
-Responde únicamente JSON válido.
+Responde únicamente JSON válido, sin texto adicional.
 
 {
 "total_ports": 0,
@@ -476,6 +557,11 @@ Responde únicamente JSON válido.
 "evidence": "cable visible conectado al puerto"
 }
 ],
+"metrics": {
+"visible_connectors": 0,
+"visible_cables": 0,
+"visible_fibers": 0
+},
 "image_quality": {
 "score": 0,
 "flags": []
@@ -506,25 +592,52 @@ def extract_text_from_message(message: Any) -> str:
     return "\n".join(chunks).strip()
 
 
-async def call_claude(image_bytes: bytes, media_type: str) -> str:
+VERIFY_PROMPT = """Eres un auditor de SEGUNDA REVISIÓN de puertos ópticos FTTH/ATP.
+
+Recibes la MISMA imagen y un análisis previo. Tu tarea es auditarlo, no repetirlo.
+
+REGLA DE ORO:
+La presencia de un adaptador SC/APC verde NO es evidencia de ocupación.
+Un puerto solo es OCCUPIED si hay evidencia visual clara de cable, fibra, patch cord o latiguillo conectado.
+
+Para cada puerto marcado como OCCUPIED en el análisis previo:
+- Verifica que exista evidencia física visible específica.
+- Si NO puedes explicar visualmente por qué está ocupado, cámbialo a "available" o "unknown".
+
+Verifica también que: occupied + available + unknown = total_ports.
+Recalcula el bloque "metrics" (visible_connectors, visible_cables, visible_fibers) según lo observable.
+
+Responde ÚNICAMENTE el JSON corregido, con exactamente el mismo formato del análisis previo, sin texto adicional.
+
+ANÁLISIS PREVIO A AUDITAR:
+{previous}
+"""
+
+
+async def _invoke_vision(
+    prompt: str,
+    image_bytes: bytes,
+    media_type: str,
+    model: str,
+    max_tokens: int = 900,
+) -> str:
     if not anthropic_client:
         raise HTTPException(503, "ANTHROPIC_API_KEY no configurado.")
 
-    prompt = build_prompt()
     image_data = base64.b64encode(image_bytes).decode("utf-8")
 
     async with analysis_semaphore:
         try:
             logger.info(
                 "Claude request model=%s media_type=%s image_size=%s",
-                ANTHROPIC_MODEL,
+                model,
                 media_type,
-                len(image_bytes)
+                len(image_bytes),
             )
 
             message = await anthropic_client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=900,
+                model=model,
+                max_tokens=max_tokens,
                 temperature=0,
                 messages=[
                     {
@@ -558,6 +671,27 @@ async def call_claude(image_bytes: bytes, media_type: str) -> str:
                 status_code=502,
                 detail=f"{type(exc).__name__}: {str(exc)}"
             )
+
+
+async def call_claude(image_bytes: bytes, media_type: str) -> str:
+    return await _invoke_vision(build_prompt(), image_bytes, media_type, ANTHROPIC_MODEL)
+
+
+async def verify_with_second_pass(
+    image_bytes: bytes,
+    media_type: str,
+    previous: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = {
+        "total_ports": previous.get("total_ports"),
+        "ports": previous.get("ports"),
+        "metrics": previous.get("metrics"),
+    }
+    prompt = VERIFY_PROMPT.replace(
+        "{previous}", json.dumps(snapshot, ensure_ascii=False)
+    )
+    raw_text = await _invoke_vision(prompt, image_bytes, media_type, VERIFICATION_MODEL)
+    return parse_json_response(raw_text)
 
 
 def parse_json_response(raw_text: str) -> dict[str, Any]:
@@ -635,7 +769,35 @@ def normalize_result(data: dict[str, Any], image_meta: dict[str, Any], source: s
     if not isinstance(quality_flags, list):
         quality_flags = []
 
-    needs_review = bool(unknown_ports or quality_score < 70 or len(ports) != total_ports)
+    metrics_raw = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    visible_connectors = max(0, to_int(metrics_raw.get("visible_connectors"), 0))
+    visible_cables = max(0, to_int(metrics_raw.get("visible_cables"), 0))
+    visible_fibers = max(0, to_int(metrics_raw.get("visible_fibers"), 0))
+
+    # Validacion cruzada deterministica: cada puerto ocupado deberia
+    # corresponder a un cable o fibra visible. Si hay muchos mas ocupados
+    # que evidencia fisica observable, es un posible falso positivo.
+    cable_evidence = max(visible_cables, visible_fibers)
+    warnings: list[str] = []
+    occupancy_consistent = True
+    if len(occupied_ports) > cable_evidence + OCCUPANCY_CABLE_TOLERANCE:
+        occupancy_consistent = False
+        warnings.append(
+            f"Posible falso positivo: {len(occupied_ports)} puertos marcados como "
+            f"ocupados pero solo {cable_evidence} cables/fibras visibles."
+        )
+
+    avg_confidence = (
+        round(sum(p["confidence"] for p in ports) / len(ports), 1) if ports else 0
+    )
+
+    needs_review = bool(
+        unknown_ports
+        or quality_score < 70
+        or len(ports) != total_ports
+        or not occupancy_consistent
+        or (ports and avg_confidence < 75)
+    )
     mensaje = (
         f"Total puertos {total_ports}. "
         f"Puertos ocupados: {format_port_list(occupied_ports)}. "
@@ -660,6 +822,16 @@ def normalize_result(data: dict[str, Any], image_meta: dict[str, Any], source: s
         "image_quality": {
             "score": max(0, min(100, quality_score)),
             "flags": [str(flag) for flag in quality_flags[:8]],
+        },
+        "metrics": {
+            "visible_connectors": visible_connectors,
+            "visible_cables": visible_cables,
+            "visible_fibers": visible_fibers,
+        },
+        "validation": {
+            "avg_confidence": avg_confidence,
+            "occupancy_consistent": occupancy_consistent,
+            "warnings": warnings,
         },
         "needs_review": needs_review,
         "summary": str(data.get("summary", ""))[:300],
@@ -703,6 +875,10 @@ async def root():
         "version": app.version,
         "learning": "active" if supabase_client else "inactive",
         "model": ANTHROPIC_MODEL,
+        "verification": {
+            "enabled": ENABLE_VERIFICATION,
+            "model": VERIFICATION_MODEL if ENABLE_VERIFICATION else None,
+        },
         "limits": {
             "max_image_bytes": MAX_IMAGE_BYTES,
             "max_concurrent_analyses": MAX_CONCURRENT_ANALYSES,
@@ -748,7 +924,23 @@ async def analyze_image(request: Request):
 
     raw_text = await call_claude(processed_bytes, "image/jpeg")
     parsed = parse_json_response(raw_text)
-    return normalize_result(parsed, image_meta, source="claude")
+    result = normalize_result(parsed, image_meta, source="claude")
+
+    # Segunda pasada solo cuando el primer analisis quedo marcado para
+    # revision (puertos dudosos, baja confianza o contradiccion de cables).
+    # Evita duplicar costo en imagenes claras.
+    if ENABLE_VERIFICATION and result["needs_review"]:
+        logger.info("Disparando verificacion en segunda pasada model=%s", VERIFICATION_MODEL)
+        try:
+            verified = await verify_with_second_pass(processed_bytes, "image/jpeg", result)
+            result = normalize_result(verified, image_meta, source="claude+verified")
+        except HTTPException as exc:
+            logger.warning("Verificacion no disponible (%s); se devuelve primer analisis.", exc.detail)
+            result["validation"]["warnings"].append(
+                "Segunda verificacion no disponible; se devuelve el primer analisis."
+            )
+
+    return result
 
 
 @app.post("/api/feedback")
